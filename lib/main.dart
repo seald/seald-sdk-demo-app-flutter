@@ -1,0 +1,1034 @@
+// You can find the full repository for this example at https://github.com/seald/seald-sdk-demo-app-flutter/
+
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart' as path_provider;
+import 'package:path/path.dart' as path;
+import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+
+import 'package:seald_sdk_flutter/seald_sdk.dart';
+import 'package:seald_sdk_flutter_example/ssks_backend.dart';
+import 'package:seald_sdk_flutter_example/credentials.dart';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class BlinkingWidget extends StatefulWidget {
+  const BlinkingWidget({super.key});
+
+  @override
+  BlinkingWidgetState createState() => BlinkingWidgetState();
+}
+
+class BlinkingWidgetState extends State<BlinkingWidget> {
+  bool _isVisible = true;
+
+  @override
+  void initState() {
+    super.initState();
+    // start the blinking animation
+    Timer.periodic(const Duration(milliseconds: 500), (timer) {
+      setState(() {
+        _isVisible = !_isVisible;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: _isVisible ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 50),
+      child: Container(
+        width: 20.0,
+        height: 20.0,
+        color: Colors.red,
+      ),
+    );
+  }
+}
+
+class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+// The Seald SDK uses a local database that will persist on disk.
+// When instantiating a SealdSDK, it is highly recommended to set a symmetric key to encrypt this database.
+// This demo will use a fixed key. In an actual app, it should be generated at signup,
+// either on the server and retrieved from your backend at login,
+// or on the client-side directly and stored in the system's keychain.
+const String databaseEncryptionKeyB64 =
+    "V4olGDOE5bAWNa9HDCvOACvZ59hUSUdKmpuZNyl1eJQnWKs5/l+PGnKUv4mKjivL3BtU014uRAIF2sOl83o6vQ";
+
+Uint8List randomBuffer(int length) {
+  final random = Random.secure();
+  final buffer = Uint8List(length);
+  for (var i = 0; i < length; ++i) {
+    buffer[i] = random.nextInt(256);
+  }
+  return buffer;
+}
+
+String randomString(int length) {
+  const chars = "abcdefghijklmnopqrstuvwxyz";
+  var random = Random();
+  return List.generate(length, (_) => chars[random.nextInt(chars.length)])
+      .join();
+}
+
+String getRegistrationJwt() {
+  // Create a json web token
+  final JWT jwt = JWT({
+    "iss": testCredentials["jwt_shared_secret_id"]!,
+    "jti": base64.encode(randomBuffer(16)),
+    "iat": DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    "scopes": [3],
+    "join_team": true
+  });
+
+  return jwt.sign(SecretKey(testCredentials["jwt_shared_secret"]!),
+      algorithm: JWTAlgorithm.HS256);
+}
+
+String getConnectorJwt(customUserId) {
+  // Create a json web token
+  final JWT jwt = JWT({
+    "iss": testCredentials["jwt_shared_secret_id"]!,
+    "jti": base64.encode(randomBuffer(16)),
+    "iat": DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    "scopes": [4],
+    "connector_add": {
+      "type": "AP",
+      "value": "$customUserId@${testCredentials["app_id"]}"
+    }
+  });
+
+  return jwt.sign(SecretKey(testCredentials["jwt_shared_secret"]!),
+      algorithm: JWTAlgorithm.HS256);
+}
+
+void assertEqual(actual, expected) {
+  if (actual != expected) {
+    print('Assert fail: expected $expected, got $actual');
+    throw AssertionError('Assertion failed');
+  }
+}
+
+void assertListEquals(actual, expected) {
+  if (!listEquals(actual, expected)) {
+    print('Assert fail: expected $expected, got $actual');
+    throw AssertionError('Assertion failed');
+  }
+}
+
+void assertNotEqual(actual, expected) {
+  if (actual == expected) {
+    print('Assert fail: expected to be not equal to $expected, got $actual');
+    throw AssertionError('Assertion failed');
+  }
+}
+
+typedef ErrorAssertion = void Function(Object err);
+
+void assertThrows(Function func, ErrorAssertion assertion) {
+  try {
+    func();
+  } catch (err) {
+    assertion(err);
+    return; // Got expected error
+  }
+  print('Assert fail: expected function to throw, but succeeded');
+  throw AssertionError('Assertion failed');
+}
+
+Future<void> assertThrowsAsync(
+    Future<void> Function() func, ErrorAssertion assertion) async {
+  try {
+    await func();
+  } catch (err) {
+    assertion(err);
+    return; // Got expected error
+  }
+  print('Assert fail: expected async function to throw, but succeeded');
+  throw AssertionError('Assertion failed');
+}
+
+Future<bool> testSealdSdk() async {
+  print('Starting SDK tests...');
+  try {
+    final Directory tmpDir = await path_provider.getTemporaryDirectory();
+    final Directory dbDir = Directory(path.join(tmpDir.path, 'seald-test-db'));
+    // Delete local database from previous run
+    if (dbDir.existsSync()) {
+      dbDir.deleteSync(recursive: true);
+    }
+
+    final SealdSdk sdk1 = SealdSdk(
+      apiURL: testCredentials["api_url"]!,
+      appId: testCredentials["app_id"]!,
+      dbPath: Directory(path.join(dbDir.path, 'sdk1')).path,
+      databaseEncryptionKeyB64: databaseEncryptionKeyB64,
+      logLevel: -1,
+      instanceName: "Dart1",
+    );
+    final SealdSdk sdk2 = SealdSdk(
+      apiURL: testCredentials["api_url"]!,
+      appId: testCredentials["app_id"]!,
+      dbPath: Directory(path.join(dbDir.path, 'sdk2')).path,
+      databaseEncryptionKeyB64: databaseEncryptionKeyB64,
+      logLevel: -1,
+      instanceName: "Dart2",
+    );
+    final SealdSdk sdk3 = SealdSdk(
+      apiURL: testCredentials["api_url"]!,
+      appId: testCredentials["app_id"]!,
+      dbPath: Directory(path.join(dbDir.path, 'sdk3')).path,
+      databaseEncryptionKeyB64: databaseEncryptionKeyB64,
+      logLevel: -1,
+      instanceName: "Dart3",
+    );
+
+    // retrieve info about current user before creating a user should return null
+    final SealdAccountInfo? retrieveNoAccount = sdk1.getCurrentAccountInfo();
+    assertEqual(retrieveNoAccount, null);
+
+    // Create the 3 accounts. Again, the signupJWT should be generated by your backend
+    final SealdAccountInfo user1AccountInfo = await sdk1.createAccountAsync(
+        getRegistrationJwt(),
+        displayName: "User1",
+        deviceName: "deviceUser1");
+    final SealdAccountInfo user2AccountInfo = await sdk2.createAccountAsync(
+        getRegistrationJwt(),
+        displayName: "User2",
+        deviceName: "deviceUser2");
+    final SealdAccountInfo user3AccountInfo = await sdk3.createAccountAsync(
+        getRegistrationJwt(),
+        displayName: "User3",
+        deviceName: "deviceUser3");
+
+    // retrieve info about current user:
+    final SealdAccountInfo? retrieveAccountInfo = sdk1.getCurrentAccountInfo();
+    assertNotEqual(retrieveAccountInfo, null);
+    assertEqual(retrieveAccountInfo?.userId, user1AccountInfo.userId);
+    assertEqual(retrieveAccountInfo?.deviceId, user1AccountInfo.deviceId);
+    assertNotEqual(retrieveAccountInfo?.deviceExpires, 0);
+    assertEqual(
+        retrieveAccountInfo?.deviceExpires, user1AccountInfo.deviceExpires);
+
+    // Create group: https://docs.seald.io/sdk/guides/5-groups.html
+    final String groupId = await sdk1.createGroupAsync(
+        groupName: "group-1",
+        members: [user1AccountInfo.userId],
+        admins: [user1AccountInfo.userId]);
+
+    // Manage group members and admins
+    await sdk1.addGroupMembersAsync(groupId,
+        membersToAdd: [user2AccountInfo.userId]); // Add user2 as group member
+    await sdk1.addGroupMembersAsync(groupId, membersToAdd: [
+      user3AccountInfo.userId
+    ], adminsToSet: [
+      user3AccountInfo.userId
+    ]); // user1 add user3 as group member and group admin
+    await sdk3.removeGroupMembersAsync(groupId,
+        membersToRemove: [user2AccountInfo.userId]); // user3 can remove user2
+    await sdk3.setGroupAdminsAsync(groupId, addToAdmins: [], removeFromAdmins: [
+      user1AccountInfo.userId
+    ]); // user3 can remove user1 from admins
+
+    // Create encryption session: https://docs.seald.io/sdk/guides/6-encryption-sessions.html
+    final SealdRecipientRights userAllRights = SealdRecipientRights(
+      read: true,
+      forward: true,
+      revoke: true,
+    );
+    final List<SealdRecipientWithRights> recipientsES1 = [
+      SealdRecipientWithRights(
+        id: user1AccountInfo.userId,
+        rights: userAllRights,
+      ),
+      SealdRecipientWithRights(
+        id: user2AccountInfo.userId,
+        rights: userAllRights,
+      ),
+      SealdRecipientWithRights(
+        id: groupId,
+        rights: userAllRights,
+      )
+    ];
+    final SealdEncryptionSession es1SDK1 =
+        await sdk1.createEncryptionSessionAsync(
+            recipientsES1); // user1, user2, and group as recipients
+    assertEqual(es1SDK1.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.created);
+
+    // Add TMR accesses to the session, then, retrieve the session using it.
+
+    // WARNING: This should be a cryptographically random buffer of 64 bytes. This random generation is NOT good enough.
+    Uint8List overEncryptionKey = randomBuffer(64);
+
+    // Create TMR a recipient
+    String authFactorType = "EM";
+    String authFactorValue = "tmr-em-flutter-${randomString(5)}@test.com";
+
+    // Add the TMR access
+    es1SDK1.addTmrAccessAsync([
+      SealdTmrRecipientWithRights(
+        type: authFactorType,
+        value: authFactorValue,
+        overEncryptionKey: overEncryptionKey,
+        rights: userAllRights,
+      )
+    ]);
+
+    // Retrieve the TMR JWT
+    SsksBackend yourCompanyDummyBackend = SsksBackend(
+        testCredentials["ssks_url"]!,
+        testCredentials["app_id"]!,
+        testCredentials["ssks_backend_app_key"]!);
+    ChallengeSendResponse authSession = await yourCompanyDummyBackend.challengeSend(
+        authFactorValue, authFactorType, authFactorValue, true, false,
+        fakeOtp:
+            true // `fakeOtp` is only on the staging server, to force the challenge to be 'aaaaaaaa'. In production, you cannot use this.
+        );
+
+    SealdSsksTMRPlugin ssksPlugin = SealdSsksTMRPlugin(
+      ssksURL: testCredentials["ssks_url"]!,
+      appId: testCredentials["app_id"]!,
+      logLevel: -1,
+      instanceName: "TMRPlugin1",
+    );
+    SealdSsksTMRPluginGetFactorTokenResponse tmrJWT =
+        await ssksPlugin.getAuthFactorTokenAsync(
+            authSession.sessionId, authFactorType, authFactorValue,
+            challenge: testCredentials["ssks_tmr_challenge"]!);
+
+    // Retrieve the encryption session using the JWT
+    final SealdEncryptionSession tmrES =
+        await sdk2.retrieveEncryptionSessionByTmrAsync(
+            tmrJWT.token, es1SDK1.id, overEncryptionKey);
+    assertEqual(tmrES.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.viaTmrAccess);
+
+    // Convert the TMR accesses
+    SealdConvertTmrAccessesResult conversionResult =
+        await sdk2.convertTmrAccessesAsync(tmrJWT.token, overEncryptionKey);
+    assertEqual(conversionResult.status, "ok");
+    assertEqual(conversionResult.converted.length, 1);
+
+    // After conversion, sdk2 can retrieve the encryption session directly.
+    final SealdEncryptionSession classicES = await sdk2
+        .retrieveEncryptionSessionAsync(sessionId: es1SDK1.id, useCache: false);
+    assertEqual(classicES.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.direct);
+
+    // Create proxy sessions
+    final SealdEncryptionSession proxySession1 =
+        await sdk1.createEncryptionSessionAsync([
+      SealdRecipientWithRights(
+        id: user1AccountInfo
+            .userId, // user1 needs to be a recipient of this session in order to be able to add it as a proxy session
+        rights: userAllRights,
+      ),
+      SealdRecipientWithRights(
+        id: user3AccountInfo.userId,
+        rights: userAllRights,
+      )
+    ]);
+    await es1SDK1.addProxySessionAsync(proxySession1.id, userAllRights);
+
+    final SealdEncryptionSession proxySession2 =
+        await sdk1.createEncryptionSessionAsync([
+      SealdRecipientWithRights(
+        id: user1AccountInfo
+            .userId, // user1 needs to be a recipient of this session in order to be able to add it as a proxy session
+        rights: userAllRights,
+      ),
+      SealdRecipientWithRights(
+        id: user2AccountInfo.userId,
+        rights: userAllRights,
+      )
+    ]);
+    await es1SDK1.addProxySessionAsync(proxySession2.id, userAllRights);
+
+    // The SealdEncryptionSession object can encrypt and decrypt for user1
+    const String initialString = "a message that needs to be encrypted!";
+    final String encryptedMessage =
+        await es1SDK1.encryptMessageAsync(initialString);
+    final String decryptedMessage =
+        await es1SDK1.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessage, initialString);
+
+    final Directory directory =
+        await path_provider.getApplicationDocumentsDirectory();
+    await removeAllFilesInDirectory(directory.path);
+    final String testFilePath = "${directory.path}/test.txt";
+    final File testFile = File(testFilePath);
+    await testFile.writeAsString(initialString);
+
+    final String encryptedFilePath =
+        await es1SDK1.encryptFileFromPathAsync(testFilePath);
+    final String decryptedFilePath =
+        await es1SDK1.decryptFileFromPathAsync(encryptedFilePath);
+    final File decryptedFile = File(decryptedFilePath);
+    assertEqual(await decryptedFile.exists(), true);
+    final Uint8List decryptedFileBytes = await decryptedFile.readAsBytes();
+    final String decryptedFileString = String.fromCharCodes(decryptedFileBytes);
+    assertEqual(decryptedFileString, initialString);
+
+    // user1 can retrieve the SealdEncryptionSession from the encrypted message
+    final String es1SDK1RetrieveFromMessId =
+        parseSessionId(message: encryptedMessage);
+    assertEqual(es1SDK1RetrieveFromMessId, es1SDK1.id);
+    final SealdEncryptionSession es1SDK1RetrieveFromMess =
+        await sdk1.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: true);
+    assertEqual(es1SDK1RetrieveFromMess.id, es1SDK1.id);
+    assertEqual(es1SDK1RetrieveFromMess.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.direct);
+    final String decryptedMessageFromMess =
+        await es1SDK1RetrieveFromMess.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageFromMess, initialString);
+
+    // user1 can retrieve the SealdEncryptionSession from the encrypted file
+    final String es1SDK1RetrieveFromFileId =
+        parseSessionId(message: encryptedMessage);
+    assertEqual(es1SDK1RetrieveFromFileId, es1SDK1.id);
+    final SealdEncryptionSession es1SDK1RetrieveFromFile =
+        await sdk1.retrieveEncryptionSessionAsync(
+            filePath: encryptedFilePath, useCache: true);
+    assertEqual(es1SDK1RetrieveFromFile.id, es1SDK1.id);
+    assertEqual(es1SDK1RetrieveFromFile.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.direct);
+    final String decryptedMessageFromFile =
+        await es1SDK1RetrieveFromFile.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageFromFile, initialString);
+
+    // user1 can retrieve the SealdEncryptionSession from the encrypted file bytes
+    final File encryptedFile = File(encryptedFilePath);
+    final Uint8List encryptedFileBytes = await encryptedFile.readAsBytes();
+    final String es1SDK1RetrieveFromFileBytesId =
+        parseSessionId(message: encryptedMessage);
+    assertEqual(es1SDK1RetrieveFromFileBytesId, es1SDK1.id);
+    final SealdEncryptionSession es1SDK1RetrieveFromFileBytes =
+        await sdk1.retrieveEncryptionSessionAsync(
+            fileBytes: encryptedFileBytes, useCache: true);
+    assertEqual(es1SDK1RetrieveFromFileBytes.id, es1SDK1.id);
+    assertEqual(es1SDK1RetrieveFromFileBytes.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.direct);
+    final String decryptedMessageFromFileBytes =
+        await es1SDK1RetrieveFromFileBytes
+            .decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageFromFileBytes, initialString);
+
+    // user2 can retrieve the SealdEncryptionSession from the session ID.
+    final SealdEncryptionSession es1SDK2 = await sdk2
+        .retrieveEncryptionSessionAsync(sessionId: es1SDK1.id, useCache: true);
+    assertEqual(es1SDK2.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.direct);
+    final String decryptedMessageSDK2 =
+        await es1SDK2.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageSDK2, initialString);
+
+    // user3 cannot retrieve the SealdEncryptionSession with lookupGroupKey set to false.
+    await assertThrowsAsync(
+        () async => sdk3.retrieveEncryptionSessionAsync(
+            message: encryptedMessage,
+            useCache: false,
+            lookupGroupKey: false), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.id, "GOSDK_NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.description, "Can't decipher this session");
+    });
+
+    // user3 can retrieve the SealdEncryptionSession from the encrypted message through the group.
+    final SealdEncryptionSession es1SDK3FromGroup =
+        await sdk3.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: true);
+    assertEqual(es1SDK3FromGroup.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.viaGroup);
+    assertEqual(es1SDK3FromGroup.retrievalDetails.groupId, groupId);
+    final String decryptedMessageSDK3 =
+        await es1SDK3FromGroup.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageSDK3, initialString);
+
+    // user3 removes all members of "group-1". A group without member is deleted.
+    await sdk3.removeGroupMembersAsync(groupId,
+        membersToRemove: [user1AccountInfo.userId, user3AccountInfo.userId]);
+
+    // user3 could retrieve the previous encryption session only because "group-1" was set as recipient.
+    // As the group was deleted, it can no longer access it.
+    // user3 still has the encryption session in its cache, but we can disable it.
+    await assertThrowsAsync(
+        () async => sdk3.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: false), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.id, "GOSDK_NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.description, "Can't decipher this session");
+    });
+
+    // user3 can still retrieve the session via proxy
+    final SealdEncryptionSession es1SDK3FromProxy =
+        await sdk3.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: true, lookupProxyKey: true);
+    assertEqual(es1SDK3FromProxy.retrievalDetails.flow,
+        SealdEncryptionSessionRetrievalFlow.viaProxy);
+    assertEqual(
+        es1SDK3FromProxy.retrievalDetails.proxySessionId, proxySession1.id);
+
+    // user2 adds user3 as recipient of the encryption session.
+    final List<SealdRecipientWithRights> addRecipient3 = [
+      SealdRecipientWithRights(
+        id: user3AccountInfo.userId,
+        rights: userAllRights,
+      )
+    ];
+    final Map<String, SealdActionStatus> asMapAdd =
+        await es1SDK2.addRecipientsAsync(addRecipient3);
+    assertEqual(asMapAdd.length, 1);
+    assertEqual(asMapAdd.containsKey(user3AccountInfo.deviceId),
+        true); // Note that addRecipient return DeviceId, not UserId
+    assertEqual(asMapAdd[user3AccountInfo.deviceId]!.success, true);
+
+    // user3 can now retrieve it without group or proxy.
+    final SealdEncryptionSession es1SDK3 =
+        await sdk3.retrieveEncryptionSessionAsync(
+            sessionId: es1SDK1.id,
+            useCache: false,
+            lookupProxyKey: false,
+            lookupGroupKey: false);
+    final String decryptedMessageAfterAdd =
+        await es1SDK3.decryptMessageAsync(encryptedMessage);
+    assertEqual(decryptedMessageAfterAdd, initialString);
+
+    // user1 revokes user3 and proxy1 from the encryption session.
+    final SealdRevokeResult resultRevoke = await es1SDK1.revokeRecipientsAsync(
+        recipientsIds: [user3AccountInfo.userId],
+        proxySessionsIds: [proxySession1.id]);
+    assertEqual(resultRevoke.recipients.length, 1);
+    assertEqual(
+        resultRevoke.recipients.containsKey(user3AccountInfo.userId), true);
+    assertEqual(
+        resultRevoke.recipients[user3AccountInfo.userId]!.success, true);
+    assertEqual(resultRevoke.proxySessions.length, 1);
+    assertEqual(resultRevoke.proxySessions.containsKey(proxySession1.id), true);
+    assertEqual(resultRevoke.proxySessions[proxySession1.id]!.success, true);
+
+    // user3 cannot retrieve the session anymore, even with proxy or group
+    await assertThrowsAsync(
+        () async => sdk3.retrieveEncryptionSessionAsync(
+            message: encryptedMessage,
+            useCache: false,
+            lookupGroupKey: true,
+            lookupProxyKey: true), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.id, "GOSDK_NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.description, "Can't decipher this session");
+    });
+
+    // user1 revokes all other recipients from the session
+    final SealdRevokeResult resultRevokeOthers = await es1SDK1
+        .revokeOthersAsync(); // revoke user2 + group (user3 is already revoked) + proxy2
+    assertEqual(resultRevokeOthers.recipients.length, 2);
+    assertEqual(
+        resultRevokeOthers.recipients.containsKey(user2AccountInfo.userId),
+        true);
+    assertEqual(
+        resultRevokeOthers.recipients[user2AccountInfo.userId]!.success, true);
+    assertEqual(resultRevokeOthers.recipients.containsKey(groupId), true);
+    assertEqual(resultRevokeOthers.recipients[groupId]!.success, true);
+    assertEqual(resultRevokeOthers.proxySessions.length, 1);
+    assertEqual(
+        resultRevokeOthers.proxySessions.containsKey(proxySession2.id), true);
+    assertEqual(
+        resultRevokeOthers.proxySessions[proxySession2.id]!.success, true);
+
+    // user2 cannot retrieve the session anymore
+    await assertThrowsAsync(
+        () async => sdk2.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: false), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.id, "GOSDK_NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.description, "Can't decipher this session");
+    });
+
+    // user1 revokes all. It can no longer retrieve it.
+    final SealdRevokeResult revokeRevokeAll =
+        await es1SDK1.revokeAllAsync(); // only user1 is left
+    assertEqual(revokeRevokeAll.recipients.length, 1);
+    assertEqual(
+        revokeRevokeAll.recipients.containsKey(user1AccountInfo.userId), true);
+    assertEqual(
+        revokeRevokeAll.recipients[user1AccountInfo.userId]!.success, true);
+    assertEqual(revokeRevokeAll.proxySessions.length, 0);
+    await assertThrowsAsync(
+        () async => sdk1.retrieveEncryptionSessionAsync(
+            message: encryptedMessage, useCache: false), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.id, "GOSDK_NO_TOKEN_FOR_YOU");
+      assertEqual(sealdErr.description, "Can't decipher this session");
+    });
+
+    // Create additional data for user1
+    final List<SealdRecipientWithRights> recipientsES2 = [
+      SealdRecipientWithRights(
+        id: user1AccountInfo.userId,
+        rights: userAllRights,
+      )
+    ];
+    final SealdEncryptionSession es2SDK1 =
+        await sdk1.createEncryptionSessionAsync(recipientsES2, useCache: true);
+    const String anotherMessage = "nobody should read that!";
+    final String secondEncryptedMessage =
+        await es2SDK1.encryptMessageAsync(anotherMessage);
+
+    // user1 can renew its key, and still decrypt old messages
+    await sdk1.renewKeysAsync(expireAfter: const Duration(days: 365 * 5));
+    final SealdEncryptionSession es2SDK1AfterRenew = await sdk1
+        .retrieveEncryptionSessionAsync(sessionId: es2SDK1.id, useCache: false);
+    final String decryptedMessageAfterRenew =
+        await es2SDK1AfterRenew.decryptMessageAsync(secondEncryptedMessage);
+    assertEqual(decryptedMessageAfterRenew, anotherMessage);
+
+    // CONNECTORS https://docs.seald.io/en/sdk/guides/jwt.html#adding-a-userid
+
+    // we can add a custom userId using a JWT
+    const String customConnectorJWTValue = "user1-custom-id";
+    await sdk1.pushJWTAsync(getConnectorJwt(customConnectorJWTValue));
+
+    final List<SealdConnector> connectors = await sdk1.listConnectorsAsync();
+    assertEqual(connectors.length, 1);
+    assertEqual(connectors[0].state, "VO");
+    assertEqual(connectors[0].type, "AP");
+    assertEqual(connectors[0].sealdId, user1AccountInfo.userId);
+    assertEqual(connectors[0].value,
+        "$customConnectorJWTValue@${testCredentials['app_id']}");
+
+    // Retrieve connector by its id
+    final SealdConnector retrieveConnector =
+        await sdk1.retrieveConnectorAsync(connectors[0].id);
+    assertEqual(retrieveConnector.sealdId, user1AccountInfo.userId);
+    assertEqual(retrieveConnector.state, "VO");
+    assertEqual(retrieveConnector.type, "AP");
+    assertEqual(retrieveConnector.value,
+        "$customConnectorJWTValue@${testCredentials['app_id']}");
+
+    // Retrieve connectors from a user id.
+    final List<SealdConnector> connectorsFromSealdId =
+        await sdk1.getConnectorsFromSealdIdAsync(user1AccountInfo.userId);
+    assertEqual(connectorsFromSealdId.length, 1);
+    assertEqual(connectorsFromSealdId[0].state, "VO");
+    assertEqual(connectorsFromSealdId[0].type, "AP");
+    assertEqual(connectorsFromSealdId[0].sealdId, user1AccountInfo.userId);
+    assertEqual(connectorsFromSealdId[0].value,
+        "$customConnectorJWTValue@${testCredentials['app_id']}");
+
+    // Get sealdId of a user from a connector
+    final List<String> sealdIds = await sdk2.getSealdIdsFromConnectorsAsync([
+      SealdConnectorTypeValue(
+          type: "AP",
+          value: "$customConnectorJWTValue@${testCredentials['app_id']}")
+    ]);
+    assertEqual(sealdIds.length, 1);
+    assertEqual(sealdIds[0], user1AccountInfo.userId);
+
+    // user1 can remove a connector
+    await sdk1.removeConnectorAsync(connectors[0].id);
+
+    // verify that no connector left
+    final List<SealdConnector> connectorListAfterRevoke =
+        await sdk1.listConnectorsAsync();
+    assertEqual(connectorListAfterRevoke.length, 0);
+
+    // user1 can export its identity
+    final Uint8List exportIdentity = sdk1.exportIdentity();
+
+    // We can instantiate a new SealdSDK, import the exported identity
+    final SealdSdk sdk1Exported = SealdSdk(
+      apiURL: testCredentials["api_url"]!,
+      appId: testCredentials["app_id"]!,
+      dbPath: Directory(path.join(dbDir.path, 'sdk1exported')).path,
+      databaseEncryptionKeyB64: databaseEncryptionKeyB64,
+      logLevel: -1,
+      instanceName: "Dart1Exported",
+    );
+    await sdk1Exported.importIdentityAsync(exportIdentity);
+
+    // SDK with imported identity can decrypt
+    final SealdEncryptionSession es2SDK1Exported = await sdk1Exported
+        .retrieveEncryptionSessionAsync(message: secondEncryptedMessage);
+    final String clearMessageExportedIdentity =
+        await es2SDK1Exported.decryptMessageAsync(secondEncryptedMessage);
+    assertEqual(clearMessageExportedIdentity, anotherMessage);
+    sdk1Exported.close();
+
+    // user1 can create sub identity
+    final SealdCreateSubIdentityResponse subIdentity =
+        await sdk1.createSubIdentityAsync(deviceName: "SUB-deviceName");
+    assertNotEqual(subIdentity.deviceId, "");
+
+    // first device needs to reencrypt for the new device
+    await sdk1.massReencryptAsync(subIdentity.deviceId);
+    // We can instantiate a new SealdSDK, import the sub-device identity
+    final SealdSdk sdk1SubDevice = SealdSdk(
+      apiURL: testCredentials["api_url"]!,
+      appId: testCredentials["app_id"]!,
+      dbPath: Directory(path.join(dbDir.path, 'sdk1SubDevice')).path,
+      databaseEncryptionKeyB64: databaseEncryptionKeyB64,
+      logLevel: -1,
+      instanceName: "Dart1SubDevice",
+    );
+    await sdk1SubDevice.importIdentityAsync(subIdentity.backupKey);
+
+    // sub device can decrypt
+    final SealdEncryptionSession es2SDK1SubDevice =
+        await sdk1SubDevice.retrieveEncryptionSessionAsync(
+            message: secondEncryptedMessage, useCache: false);
+    final String clearMessageSubdIdentity =
+        await es2SDK1SubDevice.decryptMessageAsync(secondEncryptedMessage);
+    assertEqual(clearMessageSubdIdentity, anotherMessage);
+    sdk1SubDevice.close();
+
+    await sdk1.heartbeatAsync();
+
+    // Get and Check sigchain hash
+    final SealdGetSigchainResponse user1LastSigchainHash =
+        await sdk1.getSigchainHashAsync(user1AccountInfo.userId);
+    assertEqual(user1LastSigchainHash.position, 2);
+    final SealdGetSigchainResponse user1FirstSigchainHash =
+        await sdk2.getSigchainHashAsync(user1AccountInfo.userId, position: 0);
+    assertEqual(user1FirstSigchainHash.position, 0);
+    final SealdCheckSigchainResponse lastHashCheck =
+        await sdk2.checkSigchainHashAsync(
+            user1AccountInfo.userId, user1LastSigchainHash.hash);
+    assertEqual(lastHashCheck.found, true);
+    assertEqual(lastHashCheck.position, 2);
+    assertEqual(lastHashCheck.lastPosition, 2);
+    final SealdCheckSigchainResponse firstHashCheck =
+        await sdk1.checkSigchainHashAsync(
+            user1AccountInfo.userId, user1FirstSigchainHash.hash);
+    assertEqual(firstHashCheck.found, true);
+    assertEqual(firstHashCheck.position, 0);
+    assertEqual(firstHashCheck.lastPosition, 2);
+    final SealdCheckSigchainResponse badPositionCheck =
+        await sdk2.checkSigchainHashAsync(
+            user1AccountInfo.userId, user1FirstSigchainHash.hash,
+            position: 1);
+    assertEqual(badPositionCheck.found, false);
+    // For badPositionCheck, position cannot be asserted as it is not set when the hash is not found.
+    assertEqual(badPositionCheck.lastPosition, 2);
+
+    sdk1.close();
+    sdk2.close();
+    sdk3.close();
+
+    print('SDK tests success!');
+    return true;
+  } catch (err, stack) {
+    print('SDK tests failed');
+    print(err);
+    print(stack);
+    return false;
+  }
+}
+
+Future<bool> testSsksPassword() async {
+  print('Starting SsksPassword tests...');
+  try {
+    // Simulating a Seald identity with random data, for a simpler example.
+    Uint8List dummyIdentity =
+        randomBuffer(64); // should be: sdk.exportIdentity()
+
+    SealdSsksPasswordPlugin ssksPlugin = SealdSsksPasswordPlugin(
+      ssksURL: testCredentials["ssks_url"]!,
+      appId: testCredentials["app_id"]!,
+      logLevel: -1,
+      instanceName: "PasswordPlugin",
+    );
+
+    // Test with standard password
+    String userIdPassword = "user-${randomString(11)}";
+    String userPassword = randomString(12);
+
+    // Saving the identity with a password
+    await ssksPlugin.saveIdentityFromPasswordAsync(
+        userIdPassword, userPassword, dummyIdentity);
+
+    // Retrieving the identity with the password
+    Uint8List retrievedIdentityPassword = await ssksPlugin
+        .retrieveIdentityFromPasswordAsync(userIdPassword, userPassword);
+    assertListEquals(retrievedIdentityPassword, dummyIdentity);
+
+    // Changing the password
+    String newPassword = "newPassword";
+    await ssksPlugin.changeIdentityPasswordAsync(
+        userIdPassword, userPassword, newPassword);
+
+    // The previous password does not work anymore
+    await assertThrowsAsync(
+        () async => ssksPlugin.retrieveIdentityFromPasswordAsync(
+            userIdPassword, userPassword), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "SSKSPASSWORD_CANNOT_FIND_IDENTITY");
+    });
+
+    // Retrieving with the new password works
+    Uint8List retrievedIdentityNewPassword = await ssksPlugin
+        .retrieveIdentityFromPasswordAsync(userIdPassword, newPassword);
+    assertListEquals(retrievedIdentityNewPassword, dummyIdentity);
+
+    // Test with raw keys
+    String userIdRawKeys = "user-${randomString(11)}";
+    String rawStorageKey = randomString(32);
+    Uint8List rawEncryptionKey = randomBuffer(64);
+
+    // Saving identity with raw keys
+    await ssksPlugin.saveIdentityFromRawKeysAsync(
+        userIdRawKeys, rawStorageKey, rawEncryptionKey, dummyIdentity);
+
+    // Retrieving the identity with raw keys
+    Uint8List retrievedIdentityRawKeys =
+        await ssksPlugin.retrieveIdentityFromRawKeysAsync(
+            userIdRawKeys, rawStorageKey, rawEncryptionKey);
+    assertListEquals(retrievedIdentityRawKeys, dummyIdentity);
+
+    // Deleting the identity by saving an empty `Data`
+    ssksPlugin.saveIdentityFromRawKeys(
+        userIdRawKeys, rawStorageKey, rawEncryptionKey, Uint8List(0));
+
+    // After deleting the identity, cannot retrieve anymore
+    await assertThrowsAsync(
+        () async => ssksPlugin.retrieveIdentityFromRawKeysAsync(
+            userIdRawKeys, rawStorageKey, rawEncryptionKey), (Object err) {
+      final SealdException sealdErr = err as SealdException;
+      assertEqual(sealdErr.code, "SSKSPASSWORD_CANNOT_FIND_IDENTITY");
+    });
+
+    print('SsksPassword tests success!');
+    return true;
+  } catch (err, stack) {
+    print('SsksPassword tests failed');
+    print(err);
+    print(stack);
+    return false;
+  }
+}
+
+Future<bool> testSsksTMR() async {
+  print('Starting SsksTMR tests...');
+  try {
+    SsksBackend yourCompanyDummyBackend = SsksBackend(
+        testCredentials["ssks_url"]!,
+        testCredentials["app_id"]!,
+        testCredentials["ssks_backend_app_key"]!);
+
+    // Simulating a Seald identity with random data, for a simpler example.
+    String userId = "user-${randomString(11)}";
+    Uint8List dummyIdentity =
+        randomBuffer(64); // should be: sdk.exportIdentity()
+    Uint8List rawTMRSymKey = randomBuffer(64);
+    String userEM = "email-${randomString(15)}@test.com";
+
+    SealdSsksTMRPlugin ssksPlugin = SealdSsksTMRPlugin(
+      ssksURL: testCredentials["ssks_url"]!,
+      appId: testCredentials["app_id"]!,
+      logLevel: -1,
+      instanceName: "TMRPlugin1",
+    );
+
+    // The app backend creates a session to save the identity.
+    // This is the first time that this email is storing an identity, so `must_authenticate` is false.
+    ChallengeSendResponse authSessionSave = await yourCompanyDummyBackend
+        .challengeSend(userId, "EM", userEM, true, false,
+            fakeOtp:
+                true // `fakeOtp` is only on the staging server, to force the challenge to be 'aaaaaaaa'. In production, you cannot use this.
+            );
+
+    assertEqual(authSessionSave.mustAuthenticate, false);
+
+    // Saving the identity. No challenge necessary because `must_authenticate` is false.
+    await ssksPlugin.saveIdentityAsync(authSessionSave.sessionId, "EM", userEM,
+        "", rawTMRSymKey, dummyIdentity);
+
+    // The app backend creates another session to retrieve the identity.
+    // The identity is already saved, so `must_authenticate` is true.
+    ChallengeSendResponse authSessionRetrieve = await yourCompanyDummyBackend
+        .challengeSend(userId, "EM", userEM, true, false,
+            fakeOtp:
+                true // `fakeOtp` is only on the staging server, to force the challenge to be 'aaaaaaaa'. In production, you cannot use this.
+            );
+
+    assertEqual(authSessionRetrieve.mustAuthenticate, true);
+    SealdSsksTMRPluginRetrieveIdentityResponse retrieveNotAuth =
+        await ssksPlugin.retrieveIdentityAsync(authSessionRetrieve.sessionId,
+            "EM", userEM, testCredentials["ssks_tmr_challenge"]!, rawTMRSymKey);
+    assertEqual(retrieveNotAuth.shouldRenewKey, true);
+    assertListEquals(retrieveNotAuth.identity, dummyIdentity);
+
+    // If initial key has been saved without being fully authenticated, you should renew the user's private key, and save it again.
+
+    // Let's simulate the renew with another random identity
+    Uint8List identitySecondKey = randomBuffer(64);
+    await ssksPlugin.saveIdentityAsync(
+        // to save the newly renewed identity, you can use the `authenticatedSessionId` from the response to `retrieveIdentityAsync`, with no challenge
+        retrieveNotAuth.authenticatedSessionId,
+        "EM",
+        userEM,
+        testCredentials["ssks_tmr_challenge"]!,
+        rawTMRSymKey,
+        identitySecondKey);
+
+    // And now let's retrieve this new saved identity
+    ChallengeSendResponse authSessionRetrieve2 = await yourCompanyDummyBackend
+        .challengeSend(userId, "EM", userEM, false, false,
+            fakeOtp:
+                true // `fakeOtp` is only on the staging server, to force the challenge to be 'aaaaaaaa'. In production, you cannot use this.
+            );
+
+    assertEqual(authSessionRetrieve2.mustAuthenticate, true);
+    SealdSsksTMRPluginRetrieveIdentityResponse retrievedSecondKey =
+        await ssksPlugin.retrieveIdentityAsync(authSessionRetrieve2.sessionId,
+            "EM", userEM, testCredentials["ssks_tmr_challenge"]!, rawTMRSymKey);
+    assertEqual(retrievedSecondKey.shouldRenewKey, false);
+    assertListEquals(retrievedSecondKey.identity, identitySecondKey);
+
+    // Try retrieving with another SealdSsksTMRPlugin instance
+    SealdSsksTMRPlugin ssksPluginInst2 = SealdSsksTMRPlugin(
+      ssksURL: testCredentials["ssks_url"]!,
+      appId: testCredentials["app_id"]!,
+      logLevel: -1,
+      instanceName: "TMRPlugin2",
+    );
+    ChallengeSendResponse authSessionRetrieve3 = await yourCompanyDummyBackend
+        .challengeSend(userId, "EM", userEM, false, false,
+            fakeOtp:
+                true // `fakeOtp` is only on the staging server, to force the challenge to be 'aaaaaaaa'. In production, you cannot use this.
+            );
+
+    assertEqual(authSessionRetrieve3.mustAuthenticate, true);
+    SealdSsksTMRPluginRetrieveIdentityResponse inst2Retrieve =
+        await ssksPluginInst2.retrieveIdentityAsync(
+            authSessionRetrieve3.sessionId,
+            "EM",
+            userEM,
+            testCredentials["ssks_tmr_challenge"]!,
+            rawTMRSymKey);
+    assertEqual(inst2Retrieve.shouldRenewKey, false);
+    assertListEquals(inst2Retrieve.identity, identitySecondKey);
+
+    print('SsksTMR tests success!');
+    return true;
+  } catch (err, stack) {
+    print('SsksTMR tests failed');
+    print(err);
+    print(stack);
+    return false;
+  }
+}
+
+Future<void> removeAllFilesInDirectory(String directoryPath) async {
+  Directory directory = Directory(directoryPath);
+  if (await directory.exists()) {
+    List<FileSystemEntity> files = directory.listSync();
+
+    for (var file in files) {
+      if (file is File) {
+        await file.delete();
+        print('File deleted: ${file.path}');
+      }
+    }
+
+    print('All files removed from directory.');
+  } else {
+    throw Exception('Directory not found.');
+  }
+}
+
+class _MyAppState extends State<MyApp> {
+  late Future<bool> sdkTestResult;
+  late Future<bool> ssksPasswordTestResult;
+  late Future<bool> ssksTMRTestResult;
+
+  @override
+  void initState() {
+    super.initState();
+    sdkTestResult = testSealdSdk();
+    ssksPasswordTestResult = testSsksPassword();
+    ssksTMRTestResult = testSsksTMR();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const textStyle = TextStyle(fontSize: 25);
+    const spacerSmall = SizedBox(height: 10);
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Native Packages'),
+        ),
+        body: SingleChildScrollView(
+          child: Container(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                const BlinkingWidget(),
+                spacerSmall,
+                FutureBuilder<bool>(
+                  future: sdkTestResult,
+                  builder: (BuildContext context, AsyncSnapshot<bool> value) {
+                    final String displayValue = (value.hasData)
+                        ? (value.data! ? 'success' : 'fail')
+                        : 'running';
+                    return Text(
+                      'test SDK: $displayValue',
+                      style: textStyle,
+                      textAlign: TextAlign.left,
+                    );
+                  },
+                ),
+                FutureBuilder<bool>(
+                  future: ssksPasswordTestResult,
+                  builder: (BuildContext context, AsyncSnapshot<bool> value) {
+                    final String displayValue = (value.hasData)
+                        ? (value.data! ? 'success' : 'fail')
+                        : 'running';
+                    return Text(
+                      'test SSKS Password: $displayValue',
+                      style: textStyle,
+                      textAlign: TextAlign.left,
+                    );
+                  },
+                ),
+                FutureBuilder<bool>(
+                  future: ssksTMRTestResult,
+                  builder: (BuildContext context, AsyncSnapshot<bool> value) {
+                    final String displayValue = (value.hasData)
+                        ? (value.data! ? 'success' : 'fail')
+                        : 'running';
+                    return Text(
+                      'test SSKS TMR: $displayValue',
+                      style: textStyle,
+                      textAlign: TextAlign.left,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
